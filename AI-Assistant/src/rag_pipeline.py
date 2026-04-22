@@ -38,26 +38,40 @@ class RAGPipeline:
         self.is_initialized = False
 
     def initialize(self, data_path: str = None):
-        from config.settings import CHUNKS_CACHE_PATH
+        """High-performance Incremental Sync Mode."""
         if data_path is None:
             data_path = str(RAW_DATA_DIR)
 
-        logger.info("Initializing RAG pipeline...")
-        chunks = []
-        if os.path.exists(CHUNKS_CACHE_PATH):
-            logger.info(f"Loading chunks from cache: {CHUNKS_CACHE_PATH}")
-            chunks = self.document_processor.load_chunks(CHUNKS_CACHE_PATH)
+        logger.info("Initializing RAG pipeline (Incremental Sync Mode)...")
+        
+        # 1. Load existing vector store and get processed sources
+        existing_sources = set()
+        try:
+            self.vector_store_manager.load_vector_store()
+            existing_sources = self.vector_store_manager.get_all_sources()
+            logger.info(f"Existing vector store found with {len(existing_sources)} files.")
+        except Exception:
+            logger.info("No existing vector store found or failed to load. Starting fresh.")
+
+        # 2. Process documents, skipping those already in the store
+        logger.info("Processing documents...")
+        chunks = self.document_processor.process_courses_from_root(data_path, skip_sources=existing_sources)
 
         if not chunks:
-            logger.info("Processing documents (no cache found or cache empty)...")
-            chunks = self.document_processor.process_courses_from_root(data_path)
-
-            if not chunks:
+            if existing_sources:
+                logger.info("No new documents to process. Everything is up to date.")
+                self.is_initialized = True
+                return
+            else:
                 raise ValueError("No documents were processed. Check your data directory.")
-            self.document_processor.save_chunks(chunks, CHUNKS_CACHE_PATH)
 
-        logger.info("Creating/Updating vector store...")
-        self.vector_store_manager.create_vector_store(chunks, overwrite=True)
+        # 3. Add ONLY new chunks to the vector store
+        logger.info(f"Adding {len(chunks)} new chunks to the vector store...")
+        if existing_sources:
+            self.vector_store_manager.add_documents(chunks)
+        else:
+            self.vector_store_manager.create_vector_store(chunks, overwrite=True)
+            
         self.is_initialized = True
         logger.info("RAG pipeline initialized successfully!")
 
@@ -98,72 +112,79 @@ class RAGPipeline:
         has_arabic = any('\u0600' <= char <= '\u06FF' for char in question)
 
         # -----------------------------------------------------------------
-        # 0. Intent Detection & Query Cleaning
+        # 0. Definitions & Memory
         # -----------------------------------------------------------------
-        question_lower = question.lower()
+        question_lower = question.lower().strip()
         presentation_keywords = ["presentation", "slides", "powerpoint", "pptx", "make a presentation", "عرض تقديمي", "شرائح", "بوربوينت", "اعمل عرض", "سوي بريزنتيشن"]
         recommendation_keywords = ["recommend", "suggest", "more resources", "other courses", "another video", "مقترح", "ترشيح", "مصادر أخرى", "كورس آخر", "نرشح", "زيدني"]
+        approval_keywords = ["approved", "looks good", "go ahead", "proceed", "تمام", "اعتمد", "ممتاز", "موافق", "باشر", "good", "ok", "nice", "yes", "حلو", "ماشي", "اعمله", "done"]
+
+        logger.info("Agent 1 (Memory): Rewriting query...")
+        rewritten_query = self.generator.rewrite_query_with_memory(question, history or [])
+        logger.info(f"Rewritten Query: {rewritten_query}")
 
         is_presentation = any(keyword in question_lower for keyword in presentation_keywords)
         is_recommendation = any(keyword in question_lower for keyword in recommendation_keywords)
+        is_approval = any(keyword in question_lower for keyword in approval_keywords)
 
         url_pattern = r'https?://(?:www\.)?youtube\.com/watch\?v=[0-9A-Za-z_-]{11}|https?://youtu\.be/[0-9A-Za-z_-]{11}'
-        search_query = re.sub(url_pattern, '', question_lower)
-
-        filler_phrases = presentation_keywords + recommendation_keywords + ["can you", "i want to learn", "give me", "article about", "about", "some", "best", "please", "based on the course materials", "based on", "from the materials", "summarize", "explain", "تلخيص", "شرح", "وضوح", "رشح", "ممكن", "عايز", "اتعلم", "عن", "افضل", "أفضل", "لي", "اعطني"]
-        for phrase in filler_phrases:
-            search_query = search_query.replace(phrase, "")
-        search_query = " ".join(search_query.split()).strip(" ?!.،؟")
-
-        if not search_query or len(search_query) < 2:
-            search_query = re.sub(url_pattern, '', question).strip()
-            if not search_query:
-                search_query = "general"
-
-        # -----------------------------------------------------------------
+        
         # YouTube Processing
-        # -----------------------------------------------------------------
         youtube_data = self.youtube_processor.process_url(question)
-        youtube_transcript = youtube_data.get("transcript") if youtube_data else None
-        video_meta = {"title": youtube_data.get("title"), "duration": youtube_data.get("duration"), "video_id": youtube_data.get("video_id")} if youtube_data else None
+        video_meta = {"title": youtube_data.get("title"), "duration": youtube_data.get("duration")} if youtube_data else None
 
         # -----------------------------------------------------------------
-        # ★ FAST TRACK: البريزنتيشن ★
+        # ★ PRESENTATION ARCHITECT FLOW ★
         # -----------------------------------------------------------------
-        if is_presentation:
-            logger.info("Presentation intent detected...")
-            raw_documents = forced_documents if forced_documents else self.retriever.retrieve(search_query)
+        if is_presentation or is_approval:
+            # Detect Phase 2 (Approval)
+            last_assistant_msg = ""
+            if history:
+                for msg in reversed(history):
+                    if msg["role"] == "assistant":
+                        last_assistant_msg = msg["content"]
+                        break
             
+            is_blueprint_context = "PHASE 1: THE BLUEPRINT" in last_assistant_msg or "Slide-by-Slide Outline" in last_assistant_msg
+            is_phase_2 = is_approval and is_blueprint_context
+            is_adjustment = not is_approval and is_blueprint_context and not is_presentation
+
+            logger.info(f"Presentation Architect Flow: {'Phase 2' if is_phase_2 else 'Phase 1/Refinement'}")
+            
+            # Retrieve relevant content for the topic
+            raw_documents = forced_documents if forced_documents else self.retriever.retrieve(rewritten_query)
             context_parts = []
             if youtube_data:
-                meta_header = f"[VIDEO_TITLE: {video_meta['title']}]\n[VIDEO_DURATION: {video_meta['duration']}]\n"
-                raw_transcript = youtube_data.get("transcript")
-                content = raw_transcript if raw_transcript and "[ERROR:" not in str(raw_transcript) else "[No Transcript Available]"
-                context_parts.append("[SOURCE: YOUTUBE_VIDEO_TRANSCRIPT]\n" + meta_header + content)
-            
+                context_parts.append(f"[YOUTUBE TRANSCRIPT]: {youtube_data.get('transcript', '')}")
             if raw_documents:
-                course_text = "\n\n".join([f"[Chunk {i+1}]:\n{doc.page_content}" for i, doc in enumerate(raw_documents)])
-                context_parts.append("[SOURCE: OFFICIAL_COURSE_MATERIALS]\n" + course_text)
-            
-            full_context = "\n\n---\n\n".join(context_parts) if context_parts else question
-            slides_data = self.generator.get_presentation_structure(full_context)
+                context_parts.append("\n".join([d.page_content for d in raw_documents]))
+            full_context = "\n\n".join(context_parts) if context_parts else rewritten_query
 
-            user_images = [p for p in (image_paths or []) if p and os.path.exists(p)]
-            pptx_path = self.presentation_maker.create_presentation(slides_data, user_images, "generated_presentation.pptx")
-
-            if pptx_path:
-                msg = f"لقد قمت بإنشاء العرض التقديمي لك. يمكنك العثور عليه هنا: {pptx_path}" if has_arabic else f"I have created a presentation for you. You can find it here: {pptx_path}"
-                return {"answer": msg, "sources": [], "presentation_path": pptx_path}
+            if is_phase_2:
+                # PHASE 2: Full Content Generation
+                slides_data = self.generator.get_presentation_final_content(full_context, last_assistant_msg)
+                user_images = [p for p in (image_paths or []) if p and os.path.exists(p)]
+                pptx_path = self.presentation_maker.create_presentation(slides_data, user_images, "generated_presentation.pptx")
+                
+                if pptx_path:
+                    msg = f"لقد قمت بإنشاء العرض التقديمي النهائي بناءً على المخطط المعتمد. يمكنك العثور عليه هنا: {pptx_path}" if has_arabic else f"I have generated the final presentation based on the approved blueprint. You can find it here: {pptx_path}"
+                    return {"answer": msg, "sources": [], "presentation_path": pptx_path}
+                return {"answer": "Error creating the presentation file.", "sources": []}
+            elif is_adjustment:
+                # REFINEMENT: Update Blueprint based on feedback
+                blueprint = self.generator.get_presentation_blueprint(full_context, f"Adjust the previous blueprint based on this feedback: {question}\n\nPrevious Blueprint:\n{last_assistant_msg}")
+                return {"answer": blueprint, "sources": []}
             else:
-                msg = "حاولت إنشاء عرض تقديمي ولكن حدث خطأ ما." if has_arabic else "I tried to create a presentation but something went wrong."
-                return {"answer": msg, "sources": []}
+                # PHASE 1: Initial Blueprint Generation
+                blueprint = self.generator.get_presentation_blueprint(full_context, question)
+                return {"answer": blueprint, "sources": []}
 
         # -----------------------------------------------------------------
         # ★ FAST TRACK: الترشيحات ★
         # -----------------------------------------------------------------
         if is_recommendation:
             logger.info("Recommendation intent detected...")
-            rec_query = search_query
+            rec_query = rewritten_query
             if (not rec_query or rec_query == "general") and video_meta and video_meta['title'] != "Unknown Title":
                 rec_query = video_meta['title']
             recommendation_data = self.recommender.get_all_recommendations(rec_query)
@@ -174,11 +195,6 @@ class RAGPipeline:
         # ==================================================================
         # ★ AGENTIC TRACK: سؤال عادي ★
         # ==================================================================
-
-        # 1. Agent Memory: Query Rewriting
-        logger.info("Agent 1 (Memory): Rewriting query...")
-        rewritten_query = self.generator.rewrite_query_with_memory(question, history or [])
-        logger.info(f"Rewritten Query: {rewritten_query}")
 
         # -----------------------------------------------------------------
         # ★ 2. Smart Filtering Logic ★

@@ -143,6 +143,18 @@ class VectorStoreManager:
 
         return self._vector_store  # type: ignore[return-value]
 
+    def get_all_sources(self) -> set:
+        """Returns a set of all unique 'source' paths currently in the vector store."""
+        try:
+            store = self.get_vector_store()
+            # Chroma allows fetching metadata. We fetch all and extract 'source'.
+            results = store.get(include=['metadatas'])
+            metadatas = results.get('metadatas', [])
+            return {m.get('source') for m in metadatas if m and 'source' in m}
+        except Exception as e:
+            logger.warning(f"Could not retrieve existing sources: {e}")
+            return set()
+
     def store_exists(self) -> bool:
         """Return ``True`` if a persisted vector store exists on disk."""
         return bool(
@@ -169,7 +181,9 @@ class VectorStoreManager:
     def _safe_count(self) -> int:
         
         try:
+            if self._vector_store is None:
+                return 0
             return self._vector_store._collection.count()  # type: ignore[union-attr]
         except Exception as exc:
             logger.debug(f"Could not retrieve document count: {exc}")
-            return -1
+            return 0

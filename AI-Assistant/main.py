@@ -14,69 +14,33 @@ def main():
     print(fix_arabic_text("مساعد المواد الدراسية الذكي"))
     print("=" * 60)
 
-    # Initialize RAG pipeline
+    # Initialize RAG
     rag = RAGPipeline()
-
-    # Try loading an existing vector store first
     try:
-        logger.info("Attempting to load existing vector store...")
-        rag.vector_store_manager.load_vector_store()
-
-        count = rag.vector_store_manager._safe_count()
-
-        if count == 0:
-            raise ValueError("Vector store is empty, need to rebuild")
-
-        rag.is_initialized = True
-        print(f"\n✓ Loaded existing course materials database ({count} documents)")
-
-    except Exception as e:
-        logger.info(f"Need to initialize: {str(e)}")
-        print("\n⚙ Processing course materials...")
-        print(f"   Reading files from: {RAW_DATA_DIR} (year1 / year2 / year3 / year4)")
-
-        try:
+        # Check if store exists and has data
+        if rag.vector_store_manager.store_exists():
+            logger.info("Existing vector store found. Loading...")
+            rag.vector_store_manager.load_vector_store()
+            count = rag.vector_store_manager._safe_count()
+            
+            if count > 0:
+                rag.is_initialized = True
+                print(f"\n✓ Loaded existing course materials database ({count} documents)")
+            else:
+                logger.info("Vector store is empty. Initializing...")
+                rag.initialize()
+        else:
+            logger.info("No vector store found. Starting initialization...")
             rag.initialize()
 
-            count = rag.vector_store_manager._safe_count()
-            print(f"✓ Course materials processed successfully! ({count} documents)")
+    except Exception as e:
+        logger.error(f"Error during startup: {e}")
+        print(f"\n✗ Error: Could not load data. Ensure you are using the correct Python environment.")
+        return
 
-        except Exception as init_error:
-            print(f"\n✗ Error during initialization: {str(init_error)}")
-            print("\nPlease ensure:")
-            print(f"1. Course files are placed inside the year folders:")
-            print(f"   {RAW_DATA_DIR / 'year1'}")
-            print(f"   {RAW_DATA_DIR / 'year2'}")
-            print(f"   {RAW_DATA_DIR / 'year3'}")
-            print(f"   {RAW_DATA_DIR / 'year4'}")
-            print("2. Files are in supported formats: PDF, DOCX, PPTX, TXT, Images (PNG, JPG)")
-            return
-
-    # ================================================================== #
-    # ★ التعديل الجديد: أخذ المواد المسجلة من الطالب ★
-    # ================================================================== #
-    print("\n" + "-" * 60)
-    print("🎯 To improve search accuracy, please enter your enrolled courses.")
-    print(fix_arabic_text("لتحسين دقة البحث، يرجى إدخال المواد المسجلة لديك."))
-    print("   (Separate courses with a comma ',')")
-    print(fix_arabic_text("   (افصل بين المواد بفاصلة ',')"))
-    print("   Example: Data Structures, Algorithms, Databases")
-    print(fix_arabic_text("   مثال: تراكيب بيانات, خوارزميات, قواعد بيانات"))
-    print("-" * 60)
-    
-    courses_input = input(fix_arabic_text("📚 موادك الدراسية: ")).strip()
-    
+    # Interactive query loop
+    history = []
     user_courses = None
-    if courses_input:
-        # ننضف الأسماء ونحطهم في قائمة
-        user_courses = [c.strip() for c in courses_input.split(',') if c.strip()]
-        print(f"\n✓ Agent filtering activated for: {', '.join(user_courses)}")
-        print(fix_arabic_text(f"✓ تم تفعيل فلتر المواد لـ: {', '.join(user_courses)}"))
-    else:
-        print("\n✓ No courses provided. The Agent will search across ALL course materials.")
-        print(fix_arabic_text("✓ لم يتم إدخال مواد. سيقوم النظام بالبحث في جميع المواد المتاحة."))
-
-    # ================================================================== #
 
     print("\n" + "=" * 60)
     print("You can now ask questions about your course materials or provide a YouTube URL!")

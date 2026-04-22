@@ -104,10 +104,10 @@ class PresentationMaker:
                 elif slide_type == "closing":
                     self._add_closing_slide(prs, slide_info, idx + 1, len(slides_data))
                 elif img_path:
-                    # Only use two-column layout when a real user-supplied image exists
+                    # User-supplied images take priority for two-column layout
                     self._add_two_column_slide(prs, slide_info, img_path, idx + 1, len(slides_data))
                 else:
-                    # No image provided → always render as plain content slide
+                    # High-impact content slide (respecting Rule of Six)
                     self._add_content_slide(prs, slide_info, idx + 1, len(slides_data))
 
             output_path = self._unique_path(os.path.join(self.output_dir, filename))
@@ -381,10 +381,24 @@ class PresentationMaker:
         run.font.color.rgb = self.COLOR_MUTED
 
     def _add_speaker_notes(self, slide, slide_info: dict):
+        """Adds speaker notes and Creative Director visual instructions."""
         notes_text = slide_info.get("notes", "")
-        if notes_text:
+        
+        # Append Visual Design Block if provided by the Architect
+        visual = slide_info.get("visual")
+        if visual and isinstance(visual, dict):
+            visual_block = (
+                f"\n\n🎨 VISUAL DESIGN (Creative Director)\n"
+                f"--------------------------------------\n"
+                f"IMAGE CONCEPT: {visual.get('concept', 'N/A')}\n\n"
+                f"AI IMAGE PROMPT: {visual.get('prompt', 'N/A')}\n"
+                f"STYLE: Clean 3D Isometric\n"
+            )
+            notes_text += visual_block
+
+        if notes_text.strip():
             notes_slide = slide.notes_slide
-            notes_slide.notes_text_frame.text = notes_text
+            notes_slide.notes_text_frame.text = notes_text.strip()
 
     @staticmethod
     def _coerce_list(content) -> list:

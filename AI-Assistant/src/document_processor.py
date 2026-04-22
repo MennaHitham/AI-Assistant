@@ -106,40 +106,58 @@ class DocumentProcessor:
     # ------------------------------------------------------------------ #
     # ★ الدالة الجديدة لقراءة هيكل المواد (Course-Based Structure) ★
     # ------------------------------------------------------------------ #
-    def process_courses_from_root(self, root_data_path: str) -> List[Document]:
+    def process_courses_from_root(self, root_data_path: str, skip_sources: set = None) -> List[Document]:
         """
         يقرأ فولدر الـ data الرئيسي، يكتشف فولدرات المواد جواه،
         ويعمل معالجة كاملة لكل مادة مع وضع اسم المادة في الميتاداتا.
+        يدعم الهيكل المتداخل (Department/Course).
         """
         root = Path(root_data_path)
         if not root.is_dir():
             logger.error(f"Invalid root data path: {root_data_path}")
             return []
 
-        # نبحث فقط عن الفولدرات الموجودة جوا فولدر data
-        course_folders = [d for d in root.iterdir() if d.is_dir()]
+        all_chunks = []
+        skip_sources = skip_sources or set()
         
-        if not course_folders:
-            logger.warning(f"No subfolders found in {root_data_path}. Falling back to flat processing.")
+        # نمر على كل الفولدرات (year1, year2, ...)
+        year_folders = [d for d in root.iterdir() if d.is_dir() and d.name.lower().startswith('year')]
+        
+        if not year_folders:
+            logger.warning(f"No 'year' folders found in {root_data_path}. Processing flat.")
             return self.process_documents(str(root))
 
-        all_chunks = []
-        logger.info(f"Found {len(course_folders)} course folders in '{root.name}'")
+        departments = {'ai', 'it', 'is', 'cs', 'ds', 'general'}
 
-        for course_dir in course_folders:
-            course_name = course_dir.name
-            logger.info(f"==================================================")
-            logger.info(f"Processing Course: '{course_name}'")
-            logger.info(f"==================================================")
+        for year_dir in year_folders:
+            logger.info(f"Scanning {year_dir.name}...")
             
-            # نستدعي الدالة القديمة ونعطيها اسم الفولدر كاسم للمادة
-            course_chunks = self.process_documents(
-                source_path=str(course_dir), 
-                course_name=course_name
-            )
-            
-            all_chunks.extend(course_chunks)
-            logger.info(f"Finished '{course_name}': extracted {len(course_chunks)} chunks.")
+            # نمشي في الفولدرات اللي جوه الـ year
+            for item in year_dir.rglob("*"):
+                if item.is_file() and item.suffix.lower() in self.loader_mapping:
+                    source_abs = str(item.resolve())
+                    if source_abs in skip_sources:
+                        continue
+                    
+                    # تحديد اسم المادة (Course Name)
+                    # الهيكل: yearX / [Dept] / Course / File
+                    rel_parts = item.relative_to(year_dir).parts
+                    
+                    if len(rel_parts) >= 2 and rel_parts[0].lower() in departments:
+                        # Case: yearX/AI/Machine Learning/Lecture 1.pdf -> Course = Machine Learning
+                        course_name = rel_parts[1]
+                    else:
+                        # Case: yearX/CS/Lecture 1.pdf -> Course = CS
+                        # Case: yearX/Math-1/Notes.pdf -> Course = Math-1
+                        course_name = rel_parts[0]
+                    
+                    logger.info(f"Processing: {item.name} -> Course: {course_name}")
+                    
+                    try:
+                        doc_chunks = self.process_documents(str(item), course_name=course_name)
+                        all_chunks.extend(doc_chunks)
+                    except Exception as e:
+                        logger.error(f"Error processing {item}: {e}")
 
         return all_chunks
 

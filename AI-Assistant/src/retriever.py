@@ -68,10 +68,25 @@ class Retriever:
             logger.info("Building BM25 index …")
             vector_store = self.vector_store_manager.get_vector_store()
             try:
-                data = vector_store._collection.get(include=["documents", "metadatas"])
-                docs: List[str] = data["documents"]
-                metas: List[dict] = data["metadatas"]
-                all_docs = [Document(page_content=d, metadata=m) for d, m in zip(docs, metas)]
+                # 1. Fetch all IDs first (safe)
+                all_ids = vector_store._collection.get(include=[])["ids"]
+                if not all_ids:
+                    logger.warning("No documents found in vector store to build BM25 index.")
+                    return
+
+                all_docs = []
+                # 2. Fetch documents in chunks to avoid SQLite "too many SQL variables" error
+                chunk_size = 500
+                for i in range(0, len(all_ids), chunk_size):
+                    batch_ids = all_ids[i:i + chunk_size]
+                    batch_data = vector_store._collection.get(ids=batch_ids, include=["documents", "metadatas"])
+                    
+                    for d, m in zip(batch_data["documents"], batch_data["metadatas"]):
+                        all_docs.append(Document(page_content=d, metadata=m))
+
+                if not all_docs:
+                    return
+
                 tokenized = [_tokenize(doc.page_content) for doc in all_docs]
                 self._all_docs = all_docs
                 self._bm25 = BM25Okapi(tokenized)
@@ -117,8 +132,16 @@ class Retriever:
             )
         )
 
+        # Fallback: if filtered search returns nothing, try without filter
+        if not dense_results and where_filter:
+            logger.warning(f"No results found for courses {user_courses}. Trying global search fallback...")
+            dense_results = vector_store.similarity_search_with_score(
+                query,
+                k=self.top_k * 2,
+            )
+
         if not dense_results:
-            logger.warning("Dense retrieval returned no results.")
+            logger.warning("Dense retrieval returned no results even after fallback.")
             return []
 
         dense_docs = [doc for doc, _ in dense_results]

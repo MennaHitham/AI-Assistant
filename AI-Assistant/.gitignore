@@ -9,7 +9,9 @@ venv/
 env/
 .env
 
-# Data folders
-AI-Assistant/data/processed/
-AI-Assistant/config/.env
-
+# Data and local artifacts
+data/
+presentations/
+.env
+config/.env
+*.log

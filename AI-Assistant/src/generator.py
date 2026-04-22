@@ -117,63 +117,77 @@ class Generator:
         # Fallback
         return f"Based on the course materials:\n\n{context[:800]}..."
 
-    def get_presentation_structure(self, content: str, title: str = "Presentation") -> list:
+    def get_presentation_blueprint(self, content: str, user_request: str) -> str:
         """
-        Uses the LLM to structure content into a professional list of slides.
-
-        Returns a list of dicts, each with:
-            - type:    "cover" | "content" | "two_column" | "closing"
-            - title:   str
-            - content: list[str]
-            - notes:   str  (speaker notes)
+        Phase 1: The Blueprint (Mandatory)
+        Proposes a Slide-by-Slide Outline and asks for feedback.
         """
         if not USE_GROQ or not GROQ_AVAILABLE or not self.client:
-            # Minimal fallback with cover + content + closing
-            return [
-                {
-                    "type": "cover",
-                    "title": title,
-                    "content": ["A structured overview of the topic"],
-                    "notes": "Welcome the audience and introduce yourself.",
-                },
-                {
-                    "type": "content",
-                    "title": "Overview",
-                    "content": [content[:400] + ("..." if len(content) > 400 else "")],
-                    "notes": "",
-                },
-                {
-                    "type": "closing",
-                    "title": "Thank You",
-                    "content": ["Questions & Discussion"],
-                    "notes": "Open the floor for questions.",
-                },
-            ]
+            return "Error: LLM not available for blueprint generation."
 
-        prompt = f"""You are an expert presentation designer. Structure the following content into a sequence of polished, professional PowerPoint slides.
+        prompt = f"""Act as a Professional Presentation Architect. 
+Your Goal: Help the user create a high-impact presentation using the provided course content.
 
-STRICT OUTPUT RULES:
-- Return ONLY a valid JSON array — no explanation, no markdown fences, no preamble.
-- Every object must include exactly these four keys: "type", "title", "content", "notes".
+PHASE 1: THE BLUEPRINT
+1. Analyze the provided content.
+2. Propose a Slide-by-Slide Outline. 
+3. Each slide must include a Title and a Brief Summary of Goal.
+4. Ask the user for feedback: "Does this flow work for you, or should we adjust the focus of any specific slide?"
 
-SLIDE TYPE RULES:
-1. The FIRST slide must always be type "cover".
-   - "content" must contain exactly ONE string: a short, compelling subtitle (max 12 words).
-2. Middle slides should alternate between "content" and "two_column" for visual variety.
-   - "content": 3–5 concise bullet points (max 12 words each — short phrases, not sentences).
-3. The LAST slide must always be type "closing".
-   - Use a memorable title (e.g., "Key Takeaways", "Thank You", "What's Next?").
-   - "content": 2–3 summary points or next-step actions.
-4. "notes" must be 1–2 sentences of speaker guidance for that slide (never empty for cover/closing).
+STRICT CONSTRAINT: Never explain your internal logic. Simply guide the user through the Blueprint step.
 
-QUALITY RULES:
-- Titles: max 8 words, engaging and specific (not generic like "Introduction").
-- Bullets: short phrases only — never full sentences, never repeat the title.
-- Maintain logical flow: problem → explanation → details → conclusion.
-- Aim for 5–8 total slides depending on content depth.
+[CONTENT]
+{content[:5000]}
 
-[CONTENT TO STRUCTURE]
-{content}
+[USER REQUEST]
+{user_request}
+
+Provide the Blueprint:"""
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=1500,
+                temperature=0.4,
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            logger.error(f"Blueprint generation failed: {e}")
+            return "Error generating presentation blueprint."
+
+    def get_presentation_final_content(self, content: str, approved_outline: str) -> list:
+        """
+        Phase 2: Content & Visual Design
+        Once the outline is approved, generate the final content for each slide.
+        """
+        if not USE_GROQ or not GROQ_AVAILABLE or not self.client:
+            return []
+
+        prompt = f"""Act as a Professional Presentation Architect and Creative Director.
+PHASE 2: CONTENT & VISUAL DESIGN
+
+STRICT CONSTRAINTS:
+1. Information Density: Use the "Rule of Six" (max 6 bullets per slide, max 6 words per bullet).
+2. Content Quality: Bullets must be MEANINGFUL and descriptive. Avoid single words (e.g., instead of "Predicts", use "Predicts continuous numerical output values").
+3. Tone Matching: Adapt the language to the audience (simplified for students, professional for teachers).
+4. The Creative Director Role: For EVERY slide, you must provide a Visual Instruction Block.
+
+OUTPUT FORMAT:
+Return ONLY a valid JSON array of slide objects. Each object must include:
+- "type": "content"
+- "title": Slide title.
+- "content": List of bullets (max 6).
+- "visual": {{ "concept": "...", "prompt": "..." }}
+- "notes": Speaker notes.
+
+Style Consistency: "Clean 3D Isometric".
+
+[CONTENT SOURCE]
+{content[:5000]}
+
+[APPROVED OUTLINE]
+{approved_outline}
 
 JSON array:"""
 
@@ -181,22 +195,22 @@ JSON array:"""
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=2048,
+                max_tokens=2500,
                 temperature=0.3,
             )
             raw = response.choices[0].message.content.strip()
-            logger.info(f"LLM Structure Response (first 500 chars): {raw[:500]}")
-
             slides = self._parse_json_array(raw)
-            return self._validate_and_fix_slides(slides, title)
-
+            return slides
         except Exception as e:
-            logger.error(f"Failed to structure presentation: {e}", exc_info=True)
-            return [
-                {"type": "cover",   "title": title,       "content": ["An overview"],          "notes": ""},
-                {"type": "content", "title": "Content",   "content": ["Error structuring slides — please try again."], "notes": ""},
-                {"type": "closing", "title": "Thank You", "content": ["Questions & Discussion"], "notes": ""},
-            ]
+            logger.error(f"Final content generation failed: {e}")
+            return []
+
+    def get_presentation_structure(self, content: str, title: str = "Presentation") -> list:
+        """
+        Backward compatible method - now uses high-impact standards.
+        """
+        # For a single-step 'fast track', we still use a professional prompt
+        return self.get_presentation_final_content(content, f"Slide 1: {title} Overview")
 
     # ──────────────────────────────────────────────────────────────────
     # Private helpers
