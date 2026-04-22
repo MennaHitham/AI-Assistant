@@ -1,0 +1,15 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environments
+rag/
+venv/
+env/
+.env
+
+# Data folders
+AI-Assistant/data/processed/
+AI-Assistant/config/.env
+

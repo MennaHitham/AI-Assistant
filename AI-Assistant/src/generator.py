@@ -1,0 +1,553 @@
+from typing import Dict, Optional
+import logging
+import re
+import json
+from config.settings import USE_GROQ, GROQ_API_KEY, GROQ_MODEL
+
+logger = logging.getLogger(__name__)
+
+try:
+    from groq import Groq
+    GROQ_AVAILABLE = True
+except ImportError:
+    GROQ_AVAILABLE = False
+    logger.warning("Groq not installed. Install with: pip install groq")
+
+
+QUESTION_TYPE_INSTRUCTIONS = {
+    "mcq": {
+        "en": "Select the correct option from the provided choices.",
+        "ar": "اختر الإجابة الصحيحة من الخيارات المقدمة."
+    },
+    "fill_blank": {
+        "en": "Provide only the missing word or phrase to complete the statement.",
+        "ar": "أعط الكلمة أو العبارة المفقودة فقط لإكمال الجملة."
+    },
+    "explain": {
+        "en": """Provide a well-structured, professional explanation using the following format:
+- Start with a brief, clear definition or summary (1-2 sentences).
+- Use markdown headers (###, ####) to organize sections logically.
+- Use bullet points with **bold** labels for key characteristics or points.
+- Include code blocks only if code exists in the provided materials.
+- End with a concise one-sentence summary.
+- Do NOT use "Step 1, Step 2" format. Do NOT number every paragraph.""",
+        "ar": """قدم شرحاً منظماً واحترافياً بالتنسيق التالي:
+- ابدأ بتعريف موجز وواضح (جملة أو جملتان).
+- استخدم عناوين markdown لتنظيم الأقسام بشكل منطقي.
+- استخدم النقاط مع تسميات بارزة للخصائص والنقاط الرئيسية.
+- أضف كتل الكود فقط إذا كان الكود موجوداً في المواد المقدمة.
+- اختم بجملة ملخصة موجزة.
+- لا تستخدم تنسيق الخطوات المرقمة."""
+    },
+    "true_false": {
+        "en": "State whether the statement is True or False, followed by a brief explanation.",
+        "ar": "اذكر ما إذا كانت العبارة صحيحة أم خاطئة، متبوعاً بشرح موجز."
+    },
+    "code": {
+        "en": """You are a technical mentor and programming expert. 
+If the student asks to write, implement, or provide code:
+- Provide the complete, functional, and well-commented code implementation first.
+- Then, provide a structured analysis including the sections below.
+
+If the student provides code to be analyzed:
+- Provide a structured response including:
+1. High-level Overview: What does this code do in simple terms?
+2. Step-by-Step Walkthrough: How does it execute?
+3. Variables & Functions: Explain the key components.
+4. Control Flow: Identify loops, conditionals, or recursion.
+5. Complexity Analysis: Estimate Time and Space complexity.
+6. Edge Cases & Potential Issues: What could go wrong?
+7. Improvements: Suggest optimizations or better practices.
+If the code has errors, point them out clearly.""",
+        "ar": """أنت معلم تقني وخبير برمجة.
+إذا طلب الطالب كتابة أو تنفيذ أو تقديم كود:
+- قدم الكود البرمجي الكامل والوظيفي والمشروح جيداً أولاً.
+- ثم قدم تحليلاً منظماً يتضمن الأقسام المذكورة أدناه.
+
+إذا قدم الطالب كوداً للتحليل:
+- قدم استجابة منظمة تشمل:
+1. نظرة عامة: ماذا يفعل هذا الكود بلمحة سريعة؟
+2. شرح خطوة بخطوة: كيف يتم التنفيذ؟
+3. المتغيرات والدوال: شرح المكونات الرئيسية.
+4. تدفق التحكم: تحديد الحلقات (loops)، الشروط، أو التكرار (recursion).
+5. تحليل التعقيد: تقدير التعقيد الزمني والمكاني (Complexity analysis).
+6. الحالات الحادة والمشاكل المحتملة: ما الذي قد يفشل؟
+7. التحسينات: اقتراح تحسينات أو أفضل الممارسات.
+إذا كان الكود يحتوي على أخطاء، وضحها بوضوح."""
+    }
+}
+
+
+class Generator:
+    def __init__(self):
+        self.model   = GROQ_MODEL
+        self.api_key = GROQ_API_KEY
+        if GROQ_AVAILABLE and self.api_key:
+            self.client = Groq(api_key=self.api_key)
+        else:
+            self.client = None
+
+    # ──────────────────────────────────────────────────────────────────
+    # Public API
+    # ──────────────────────────────────────────────────────────────────
+
+    def generate_answer(
+        self,
+        question: str,
+        context: str,
+        question_type: str = None,
+        is_youtube: bool = False,
+        history: list = None,
+        recommendations: dict = None,
+    ) -> str:
+        """Generate an answer from context using Groq or a simple fallback."""
+
+        if question_type is None:
+            question_type = self._detect_question_type(question)
+
+        if USE_GROQ and GROQ_AVAILABLE and self.client:
+            try:
+                return self._generate_with_groq(
+                    question, context, question_type, is_youtube, history, recommendations
+                )
+            except Exception as e:
+                logger.error(f"Groq generation failed: {e}")
+                logger.info("Falling back to simple context display")
+
+        # Fallback
+        return f"Based on the course materials:\n\n{context[:800]}..."
+
+    def get_presentation_structure(self, content: str, title: str = "Presentation") -> list:
+        """
+        Uses the LLM to structure content into a professional list of slides.
+
+        Returns a list of dicts, each with:
+            - type:    "cover" | "content" | "two_column" | "closing"
+            - title:   str
+            - content: list[str]
+            - notes:   str  (speaker notes)
+        """
+        if not USE_GROQ or not GROQ_AVAILABLE or not self.client:
+            # Minimal fallback with cover + content + closing
+            return [
+                {
+                    "type": "cover",
+                    "title": title,
+                    "content": ["A structured overview of the topic"],
+                    "notes": "Welcome the audience and introduce yourself.",
+                },
+                {
+                    "type": "content",
+                    "title": "Overview",
+                    "content": [content[:400] + ("..." if len(content) > 400 else "")],
+                    "notes": "",
+                },
+                {
+                    "type": "closing",
+                    "title": "Thank You",
+                    "content": ["Questions & Discussion"],
+                    "notes": "Open the floor for questions.",
+                },
+            ]
+
+        prompt = f"""You are an expert presentation designer. Structure the following content into a sequence of polished, professional PowerPoint slides.
+
+STRICT OUTPUT RULES:
+- Return ONLY a valid JSON array — no explanation, no markdown fences, no preamble.
+- Every object must include exactly these four keys: "type", "title", "content", "notes".
+
+SLIDE TYPE RULES:
+1. The FIRST slide must always be type "cover".
+   - "content" must contain exactly ONE string: a short, compelling subtitle (max 12 words).
+2. Middle slides should alternate between "content" and "two_column" for visual variety.
+   - "content": 3–5 concise bullet points (max 12 words each — short phrases, not sentences).
+3. The LAST slide must always be type "closing".
+   - Use a memorable title (e.g., "Key Takeaways", "Thank You", "What's Next?").
+   - "content": 2–3 summary points or next-step actions.
+4. "notes" must be 1–2 sentences of speaker guidance for that slide (never empty for cover/closing).
+
+QUALITY RULES:
+- Titles: max 8 words, engaging and specific (not generic like "Introduction").
+- Bullets: short phrases only — never full sentences, never repeat the title.
+- Maintain logical flow: problem → explanation → details → conclusion.
+- Aim for 5–8 total slides depending on content depth.
+
+[CONTENT TO STRUCTURE]
+{content}
+
+JSON array:"""
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=2048,
+                temperature=0.3,
+            )
+            raw = response.choices[0].message.content.strip()
+            logger.info(f"LLM Structure Response (first 500 chars): {raw[:500]}")
+
+            slides = self._parse_json_array(raw)
+            return self._validate_and_fix_slides(slides, title)
+
+        except Exception as e:
+            logger.error(f"Failed to structure presentation: {e}", exc_info=True)
+            return [
+                {"type": "cover",   "title": title,       "content": ["An overview"],          "notes": ""},
+                {"type": "content", "title": "Content",   "content": ["Error structuring slides — please try again."], "notes": ""},
+                {"type": "closing", "title": "Thank You", "content": ["Questions & Discussion"], "notes": ""},
+            ]
+
+    # ──────────────────────────────────────────────────────────────────
+    # Private helpers
+    # ──────────────────────────────────────────────────────────────────
+
+    def _parse_json_array(self, text: str) -> list:
+        """Robustly extract and parse a JSON array from LLM output."""
+        # Strip markdown fences if present
+        clean = re.sub(r"```(?:json)?", "", text).replace("```", "").strip()
+
+        # Try direct parse first
+        try:
+            result = json.loads(clean)
+            if isinstance(result, list):
+                return result
+        except json.JSONDecodeError:
+            pass
+
+        # Try to extract the outermost [...] block
+        match = re.search(r'\[\s*\{.*\}\s*\]', clean, re.DOTALL)
+        if match:
+            return json.loads(match.group(0))
+
+        raise ValueError("No valid JSON array found in LLM response.")
+
+    def _validate_and_fix_slides(self, slides: list, title: str) -> list:
+        """Ensure slides list has correct structure, cover, and closing slide."""
+        valid_types = {"cover", "content", "two_column", "closing"}
+
+        for slide in slides:
+            # Normalise type
+            if slide.get("type") not in valid_types:
+                slide["type"] = "content"
+            # Ensure content is a list
+            if isinstance(slide.get("content"), str):
+                slide["content"] = [slide["content"]]
+            elif not isinstance(slide.get("content"), list):
+                slide["content"] = []
+            # Ensure notes is a string
+            if not isinstance(slide.get("notes"), str):
+                slide["notes"] = ""
+            # Ensure title
+            if not slide.get("title"):
+                slide["title"] = "Slide"
+
+        # Guarantee first slide is cover
+        if not slides or slides[0].get("type") != "cover":
+            slides.insert(0, {
+                "type": "cover",
+                "title": title,
+                "content": ["A structured overview of the topic"],
+                "notes": "Welcome the audience and introduce yourself.",
+            })
+
+        # Guarantee last slide is closing
+        if len(slides) < 2 or slides[-1].get("type") != "closing":
+            slides.append({
+                "type": "closing",
+                "title": "Thank You",
+                "content": ["Questions & Discussion"],
+                "notes": "Open the floor for questions.",
+            })
+
+        return slides
+
+    def _detect_question_type(self, question: str) -> str:
+        """Automatically detect question type based on heuristics."""
+        question_lower = question.lower().strip()
+
+        if re.search(r"\b[A-D]\)", question) or any(
+            kw in question_lower for kw in ["choose", "which of the following", "اختر", "أي مما يلي"]
+        ):
+            return "mcq"
+
+        if any(kw in question_lower for kw in ["true or false", "صح أم خطأ", "صح أو خطأ"]):
+            return "true_false"
+
+        if "____" in question or "..." in question or any(
+            kw in question_lower for kw in ["complete", "fill in", "اكمل", "أكمل"]
+        ):
+            return "fill_blank"
+
+        code_keywords = [
+            "code", "function", "variable", "class", "loop", "algorithm",
+            "complexity", "syntax", "debug", "refactor",
+            "كود", "دالة", "متغير", "خوارزمية",
+        ]
+        if "```" in question or any(kw in question_lower for kw in code_keywords):
+            return "code"
+
+        return "explain"
+
+    def _build_messages(
+        self,
+        question: str,
+        context: str,
+        question_type: str,
+        history: list,
+        rec_text: str,
+        has_arabic: bool,
+    ) -> list:
+        """Build the messages list for the Groq chat completion call."""
+
+        q_type      = question_type if question_type in QUESTION_TYPE_INSTRUCTIONS else "explain"
+        instruction = QUESTION_TYPE_INSTRUCTIONS[q_type]["ar" if has_arabic else "en"]
+
+        # ── System prompt ──────────────────────────────────────────────
+        if has_arabic:
+            system_prompt = f"""أنت مساعد تعليمي. معرفتك مقيدة تماماً بالمحتوى الموجود في [SOURCE: OFFICIAL_COURSE_MATERIALS] و [SOURCE: YOUTUBE_VIDEO_TRANSCRIPT] فقط.
+
+قواعد صارمة يجب اتباعها دون استثناء:
+1.  ممنوع الإجابة من معرفتك العامة الخاصة. لا يُسمح لك باستخدام أي معلومة خارج المواد الدراسية المقدمة.
+2. إذا لم يُذكر الموضوع أو الإجابة في المحتوى المقدم، يجب أن تجيب فقط بـ:
+   " هذا الموضوع غير مذكور في المواد الدراسية. لا أستطيع الإجابة إلا بناءً على المستندات المقدمة."
+   لا تحاول الإجابة أو التخمين أو تقديم معلومات جزئية من خارج المواد.
+3. الاستثناء الوحيد للقاعدة الأولى هو إذا كان السؤال عن بناء الجملة البرمجية (Syntax) أو تصحيح أخطاء كود موجود فعلاً في المواد الدراسية.
+4. إذا سأل الطالب عن معلومة وقدم رابط فيديو، ابحث أولاً في [SOURCE: YOUTUBE_VIDEO_TRANSCRIPT] واذكر الوقت الدقيق (مثال: "ذكر المحاضر عند الدقيقة [00:12:30] أن...").
+5. في حالة ملاحظة "[Transcription Blocked]" أو "[No Transcript Available]"، أخبر الطالب أنك لم تتمكن من قراءة التفاصيل واعرض المساعدة من مواد الكورس.
+6. في حالة الأسئلة التي تطلب "ترشيحات"، استخدم بيانات [RECOMMENDED_RESOURCES] فقط.
+7. لا تعرض الترشيحات إذا كان الطالب يطلب تلخيص الفيديو المقدم.
+8. ممنوع تماماً تقديم أي روابط بحث عامة أو روابط لمواقع أخرى.
+9. استخدم سجل المحادثة لفهم الأسئلة المتابعة.
+10. الإجابة يجب أن تكون منسقة ومنظمة (استخدم النقاط والعناوين الفرعية والكود عند الحاجة).
+11. إذا كانت قائمة الترشيحات فارغة، قل فقط: "عذراً، لم أجد روابط يوتيوب مناسبة حالياً."
+12. أجب فقط عن المفهوم المحدد الذي سأل عنه الطالب. المحتوى المسترجع قد يحتوي على عدة مفاهيم أو مواضيع في نفس الجزء — استخرج وقدم فقط ما يتعلق مباشرةً بسؤال الطالب. تجاهل المفاهيم غير ذات الصلة حتى لو كانت في نفس الجزء.
+
+تعليمات خاصة بنوع السؤال:
+{instruction}"""
+        else:
+            system_prompt = f"""You are a helpful teaching assistant. Your knowledge is STRICTLY LIMITED to the content provided in [SOURCE: OFFICIAL_COURSE_MATERIALS] and [SOURCE: YOUTUBE_VIDEO_TRANSCRIPT] below.
+
+STRICT RULES — YOU MUST FOLLOW THESE WITHOUT EXCEPTION:
+1.  NEVER answer from your own general knowledge. You are NOT allowed to use any information outside the provided course materials.
+2. If the topic or answer is NOT found in the provided content, you MUST respond ONLY with:
+   " This topic is not covered in the course materials. I can only answer questions based on the provided documents."
+   Do NOT attempt to answer, guess, or provide partial information from outside the materials.
+3. The ONLY exception to rule 1 is if the question is about CODE SYNTAX or DEBUGGING of code that already appears in the course materials — in that case you may assist technically.
+4. Answer from [SOURCE: YOUTUBE_VIDEO_TRANSCRIPT] first if a video link was provided. Include exact timestamps (e.g., "The speaker mentions at [00:05:20] that...").
+5. If you see "[Transcription Blocked]" or "[No Transcript Available]", inform the user and offer to help using course materials instead.
+6. If the student asks for "recommendations" or "resources", use ONLY the [RECOMMENDED_RESOURCES] section.
+7. NEVER show recommendations when the user asks to summarize the provided video.
+8. DO NOT provide general search links or links to other platforms.
+9. Use conversation history to understand follow-up questions.
+10. Format all responses with markdown (bullet points, subheadings, code blocks where needed).
+11. If the recommendations list is empty, say: "I'm sorry, I couldn't find any specific YouTube recommendations for this topic at the moment."
+12. Answer ONLY the specific concept asked about. The retrieved content may contain multiple topics or concepts in the same chunk — extract and present ONLY what is directly relevant to the student's question. Silently ignore unrelated concepts even if they appear in the same chunk.
+
+Special instructions for this question type:
+{instruction}"""
+
+        # ── User content ───────────────────────────────────────────────
+        if has_arabic:
+            user_content = f"""المحتوى المقدم:
+{context if context.strip() else "لا يوجد محتوى إضافي من المصادر."}
+
+[RECOMMENDED_RESOURCES]
+{rec_text if rec_text else "لا توجد ترشيحات متوفرة حالياً."}
+
+سؤال الطالب: {question}"""
+        else:
+            user_content = f"""Provided Content:
+{context if context.strip() else "No additional context from sources."}
+
+[RECOMMENDED_RESOURCES]
+{rec_text if rec_text else "No specific recommendations found currently."}
+
+Student Question: {question}"""
+
+        # ── Assemble messages (system → history → current user turn) ───
+        messages = [{"role": "system", "content": system_prompt}]
+
+        if history:
+            for turn in history[-5:]:   # last 5 turns for context window efficiency
+                role = "user" if turn["role"] == "user" else "assistant"
+                messages.append({"role": role, "content": turn["content"]})
+
+        messages.append({"role": "user", "content": user_content})
+        return messages
+
+    def _generate_with_groq(
+        self,
+        question: str,
+        context: str,
+        question_type: str,
+        is_youtube: bool,
+        history: list = None,
+        recommendations: dict = None,
+    ) -> str:
+        """Generate an answer using the Groq cloud API."""
+
+        has_arabic = any("\u0600" <= ch <= "\u06FF" for ch in question)
+
+        # Format recommendations
+        rec_text = ""
+        if recommendations and recommendations.get("youtube"):
+            rec_text = "YouTube Courses & Videos:\n"
+            for rec in recommendations["youtube"]:
+                rec_text += f"- {rec['title']} ({rec['duration']}): {rec['link']}\n"
+
+        messages = self._build_messages(
+            question, context, question_type, history or [], rec_text, has_arabic
+        )
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                max_tokens=2048,
+                temperature=0.5,
+            )
+            return response.choices[0].message.content
+
+        except Exception as e:
+            logger.error(f"Groq generation failed in _generate_with_groq: {e}")
+            return "Error: Failed to generate a response using the Groq API."
+    
+
+    # ================================================================== #
+    # ★ الـ AGENTIC TOOLS الجديدة (Approach 5 & Memory) ★
+    # ================================================================== #
+
+    def rewrite_query_with_memory(self, question: str, history: list) -> str:
+        """Agent 1: Memory - يحول السؤال لسؤال مستقل بناءً على السياق."""
+        if not history:
+            return question
+        
+        has_arabic = any("\u0600" <= ch <= "\u06FF" for ch in question)
+        
+        if has_arabic:
+            prompt = """أنت مساعد ذكي مهمتك الوحيدة هي إعادة صياغة أسئلة المستخدم.
+بناءً على محادثة المستخدم الحالية، قم بصياغة السؤال الأخير كـ 'سؤال مستقل' بحيث يمكن فهمه بدون باقي المحادثة.
+قواعد صارمة:
+1. ممنوع تماماً الإجابة على السؤال.
+2. ممنوع إدراج أي نص من إجابات المساعد السابقة في مخرجاتك.
+3. أخرج السؤال المستقل فقط بدون أي كلام إضافي.
+
+السؤال الأخير:"""
+        else:
+            prompt = """You are a query rewriter. Your ONLY job is to rewrite the user's latest question.
+Based on the chat history, rewrite the latest question as a standalone question that can be understood without the conversation history.
+STRICT RULES:
+1. DO NOT answer the question.
+2. DO NOT include previous assistant responses in your output.
+3. Output EXACTLY ONE LINE: the rewritten question only.
+
+Latest question:"""
+
+        messages = [{"role": "system", "content": prompt}]
+        for turn in history[-3:]: 
+            messages.append({"role": turn["role"], "content": turn["content"]})
+        messages.append({"role": "user", "content": question})
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model, messages=messages, max_tokens=100, temperature=0.1
+            )
+            return response.choices[0].message.content.strip('"').strip()
+        except Exception as e:
+            logger.error(f"Query rewrite failed: {e}")
+            return question
+
+    def evaluate_documents(self, question: str, context: str) -> str:
+        """Agent 2: Evaluator - هل المحتوى المسترجع يحتوي بالفعل على الإجابة؟"""
+        has_arabic = any("\u0600" <= ch <= "\u06FF" for ch in question)
+        
+        if has_arabic:
+            prompt = f"""أنت مساعد ذكي. انظر إلى سؤال الطالب والمحتوى المسترجع.
+هل المحتوى يحتوي على معلومات كافية ومباشرة للإجابة على السؤال؟
+إذا كان المحتوى يتحدث عن شيء آخر تماماً أو غير كاف، أجب بـ "No".
+إذا كان المحتوى يحتوي على الإجابة أو جزء رئيسي منها، أجب بـ "Yes".
+أجب بكلمة واحدة فقط: Yes أو No.
+
+السؤال: {question}
+المحتوى: {context[:1500]}"""
+        else:
+            prompt = f"""You are an intelligent assistant. Look at the user's question and the retrieved document.
+Does this document actually contain the specific answer to the question?
+If the document is about something else entirely or lacks the answer, output "No".
+If it contains the answer or a major part of it, output "Yes".
+Output EXACTLY one word: Yes or No.
+
+Question: {question}
+Context: {context[:1500]}"""
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model, messages=[{"role": "user", "content": prompt}], max_tokens=5, temperature=0.0
+            )
+            answer = response.choices[0].message.content.strip()
+            return "Yes" if "yes" in answer.lower() else "No"
+        except Exception as e:
+            logger.error(f"Evaluation failed: {e}")
+            return "No"
+
+    def route_query(self, question: str) -> str:
+        """Agent 3: Router - هل السؤال أكاديمي/جامعي محض ولا معرفة عامة؟"""
+        has_arabic = any("\u0600" <= ch <= "\u06FF" for ch in question)
+        
+        if has_arabic:
+            prompt = f"""صنف السؤال التالي إلى فئة واحدة فقط:
+1. college_specific: أسئلة عن الدرجات، المواعيد، سياسات القسم، أساتذة معينين، أو تسجيل المواد.
+2. general_knowledge: أسئلة عن مفاهيم علمية، برمجة، رياضيات، أو نظريات يمكن الإجابة عليها من المعرفة العامة.
+أجب فقط بكلمة واحدة: college_specific أو general_knowledge.
+
+السؤال: {question}"""
+        else:
+            prompt = f"""Classify the following question into exactly one category:
+1. college_specific: Questions about grades, schedules, department policies, specific professors, or course registration.
+2. general_knowledge: Questions about scientific concepts, programming, math, or theories that can be answered from general knowledge.
+Output EXACTLY one word: college_specific or general_knowledge.
+
+Question: {question}"""
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model, messages=[{"role": "user", "content": prompt}], max_tokens=20, temperature=0.0
+            )
+            answer = response.choices[0].message.content.strip().lower()
+            if "college" in answer:
+                return "college_specific"
+            return "general_knowledge"
+        except Exception as e:
+            return "general_knowledge"
+
+    def generate_general_answer(self, question: str, history: list = None) -> str:
+        """Agent 4: General Fallback - يجاوب من دماغه مع Disclaimer."""
+        has_arabic = any("\u0600" <= ch <= "\u06FF" for ch in question)
+        
+        if has_arabic:
+            sys_prompt = """أنت مساعد تعليمي ذكي. السؤال الحالي ليس موجوداً في المحاضرات أو المواد الدراسية المرفوعة.
+لذلك، مُنح لك صلاحية الإجابة من معرفتك العامة.
+قاعدة صارمة: يجب أن تبدأ إجابتك بالتحذير التالي بالضبط:
+"⚠️ تنبيه: هذه الإجابة من معرفتي العامة وليست من ضمن المحاضرات المرفوعة، يرجى التحقق منها."
+بعد التحذير، قدم إجابة مفيدة ومنظمة وسديدة."""
+        else:
+            sys_prompt = """You are a smart educational assistant. The current question was NOT found in the uploaded course materials.
+Therefore, you are granted permission to answer from your general knowledge.
+STRICT RULE: You MUST start your answer with the EXACT disclaimer:
+"⚠️ Disclaimer: This answer is from my general knowledge and is NOT from the uploaded lectures, please verify it."
+After the disclaimer, provide a helpful, well-structured, and accurate answer."""
+
+        messages = [{"role": "system", "content": sys_prompt}]
+        if history:
+            for turn in history[-3:]:
+                messages.append({"role": turn["role"], "content": turn["content"]})
+        messages.append({"role": "user", "content": question})
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model, messages=messages, max_tokens=1024, temperature=0.5
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            return "Error: Failed to generate a general response."

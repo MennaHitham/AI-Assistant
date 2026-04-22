@@ -1,0 +1,13 @@
+__pycache__
+venv/
+.git/
+.env
+.ipynb_checkpoints/
+*.mp4
+*.webm
+*.avi
+*.mov
+# Ignore potential large data dirs if not needed for build context, 
+# but we might want them copied if we don't bind mount everything.
+# Since we bind mount data, we can ignore it in build context to speed up build.
+AI-Assistant/data/

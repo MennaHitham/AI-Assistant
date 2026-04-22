@@ -1,0 +1,188 @@
+from __future__ import annotations
+
+import logging
+import threading
+from typing import List, Optional, Tuple
+
+import numpy as np
+from langchain_core.documents import Document
+from rank_bm25 import BM25Okapi
+from sentence_transformers import CrossEncoder
+
+from src.vector_store import VectorStoreManager
+from config.settings import TOP_K_RESULTS
+
+logger = logging.getLogger(__name__)
+logger.addHandler(logging.NullHandler())
+
+_RERANKER_MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+_reranker_instance: Optional[CrossEncoder] = None
+_reranker_lock = threading.Lock()
+
+def _get_reranker() -> CrossEncoder:
+    global _reranker_instance
+    if _reranker_instance is not None:
+        return _reranker_instance
+    with _reranker_lock:
+        if _reranker_instance is None:
+            logger.info(f"Loading CrossEncoder reranker: {_RERANKER_MODEL_NAME}")
+            _reranker_instance = CrossEncoder(_RERANKER_MODEL_NAME)
+            logger.info("Reranker loaded successfully.")
+    return _reranker_instance
+
+def _normalize(scores: np.ndarray) -> np.ndarray:
+    min_s, max_s = scores.min(), scores.max()
+    if max_s - min_s < 1e-9:
+        return np.zeros_like(scores, dtype=float)
+    return (scores - min_s) / (max_s - min_s)
+
+class Retriever:
+    def __init__(
+        self,
+        top_k: int = TOP_K_RESULTS,
+        dense_weight: float = 0.7,
+        bm25_weight: float = 0.3,
+        vector_store_manager: Optional["VectorStoreManager"] = None,
+    ) -> None:
+        if not (0.0 <= dense_weight <= 1.0 and 0.0 <= bm25_weight <= 1.0):
+            raise ValueError("Weights must be between 0 and 1.")
+        if abs(dense_weight + bm25_weight - 1.0) > 1e-6:
+            raise ValueError("dense_weight + bm25_weight must equal 1.0.")
+
+        self.top_k = top_k
+        self.dense_weight = dense_weight
+        self.bm25_weight = bm25_weight
+        self.vector_store_manager = vector_store_manager or VectorStoreManager()
+
+        self._bm25_lock = threading.Lock()
+        self._bm25: Optional[BM25Okapi] = None
+        self._all_docs: Optional[List[Document]] = None
+        self._reranker = _get_reranker()
+
+    def _initialize_bm25(self) -> None:
+        if self._bm25 is not None:
+            return
+        with self._bm25_lock:
+            if self._bm25 is not None:
+                return
+            logger.info("Building BM25 index …")
+            vector_store = self.vector_store_manager.get_vector_store()
+            try:
+                data = vector_store._collection.get(include=["documents", "metadatas"])
+                docs: List[str] = data["documents"]
+                metas: List[dict] = data["metadatas"]
+                all_docs = [Document(page_content=d, metadata=m) for d, m in zip(docs, metas)]
+                tokenized = [_tokenize(doc.page_content) for doc in all_docs]
+                self._all_docs = all_docs
+                self._bm25 = BM25Okapi(tokenized)
+                logger.info(f"BM25 index built with {len(all_docs)} documents.")
+            except Exception as exc:
+                logger.error(f"Failed to build BM25 index: {exc}")
+                self._all_docs = []
+                self._bm25 = None
+
+    def invalidate_bm25(self) -> None:
+        with self._bm25_lock:
+            self._bm25 = None
+            self._all_docs = None
+        logger.info("BM25 index invalidated.")
+
+    # ------------------------------------------------------------------
+    # ★ التعديل الأساسي: استقبال قائمة المواد للفلترة ★
+    # ------------------------------------------------------------------
+    def retrieve(
+        self,
+        query: str,
+        user_courses: Optional[List[str]] = None, # تغيير من academic_year إلى user_courses
+    ) -> List[Document]:
+        
+        logger.info(f"Retrieving for query: {query[:80]!r}")
+        vector_store = self.vector_store_manager.get_vector_store()
+        self._initialize_bm25()
+
+        # ---- Step 1: Dense retrieval with Course Filtering --------
+        where_filter = None
+        if user_courses:
+            # تنظيف أسماء المواد عشان مطابقة الـ Metadata
+            clean_courses = [c.lower().strip() for c in user_courses if c.strip()]
+            if clean_courses:
+                where_filter = {"course_name": {"$in": clean_courses}}
+                logger.info(f"Applying user_courses filter: {clean_courses}")
+
+        dense_results: List[Tuple[Document, float]] = (
+            vector_store.similarity_search_with_score(
+                query,
+                k=self.top_k * 2,
+                filter=where_filter,
+            )
+        )
+
+        if not dense_results:
+            logger.warning("Dense retrieval returned no results.")
+            return []
+
+        dense_docs = [doc for doc, _ in dense_results]
+        raw_dense = np.array([max(0.0, 1.0 - (score / 2.0)) for _, score in dense_results])
+        norm_dense = _normalize(raw_dense)
+
+        dense_score_map: dict[tuple, float] = {
+            _doc_key(doc): float(norm_dense[i])
+            for i, doc in enumerate(dense_docs)
+        }
+
+        # ---- Step 2: BM25 retrieval -----------------------------------------
+        bm25_score_map: dict[tuple, float] = {}
+        if self._bm25 and self._all_docs:
+            tokenized_query = _tokenize(query)
+            raw_bm25 = np.array(self._bm25.get_scores(tokenized_query))
+            norm_bm25 = _normalize(raw_bm25)
+            for doc, score in zip(self._all_docs, norm_bm25):
+                bm25_score_map[_doc_key(doc)] = float(score)
+
+        # ---- Step 3: Combine scores -----------------------------------------
+        combined: List[Tuple[Document, float]] = []
+        for doc in dense_docs:
+            key = _doc_key(doc)
+            d_score = dense_score_map.get(key, 0.0)
+            b_score = bm25_score_map.get(key, 0.0)
+            final = self.dense_weight * d_score + self.bm25_weight * b_score
+            combined.append((doc, final))
+
+        combined.sort(key=lambda x: x[1], reverse=True)
+        candidates = [doc for doc, _ in combined[: self.top_k * 2]]
+        
+        return self._rerank(query, candidates)
+
+    def retrieve_with_scores(
+        self, query: str, user_courses: Optional[List[str]] = None
+    ) -> List[Tuple[str, dict, float]]:
+        candidates = self.retrieve(query, user_courses=user_courses)
+        if not candidates:
+            return []
+        pairs = [[query, doc.page_content] for doc in candidates]
+        try:
+            scores: List[float] = self._reranker.predict(pairs).tolist()
+        except Exception as exc:
+            scores = [0.0] * len(candidates)
+        return [(doc.page_content, doc.metadata, score) for doc, score in zip(candidates, scores)]
+
+    def _rerank(self, query: str, docs: List[Document]) -> List[Document]:
+        if not docs:
+            return []
+        try:
+            pairs = [[query, doc.page_content] for doc in docs]
+            scores: np.ndarray = self._reranker.predict(pairs)
+            reranked = sorted(zip(docs, scores), key=lambda x: x[1], reverse=True)
+            final = [doc for doc, _ in reranked[: self.top_k]]
+            return final
+        except Exception as exc:
+            logger.error(f"Reranking failed ({exc}); returning hybrid-scored order.")
+            return docs[: self.top_k]
+
+def _tokenize(text: str) -> List[str]:
+    import re
+    cleaned = re.sub(r"[^\w\s]", " ", text, flags=re.UNICODE)
+    return cleaned.split()
+
+def _doc_key(doc: Document) -> tuple:
+    return (doc.page_content, doc.metadata.get("source", ""))
