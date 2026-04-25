@@ -1,0 +1,32 @@
+# Environment
+env/
+venv/
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+pip-log.txt
+pip-delete-this-directory.txt
+.venv/
+.virtualenv/
+
+# Django
+db.sqlite3
+media/
+staticfiles/
+
+# AI Engine Data (Exclude raw data but keep processed)
+ai_engine/data/raw/
+ai_engine/data/processed/
+ai_engine/src/__pycache__/
+ai_engine/config/__pycache__/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
