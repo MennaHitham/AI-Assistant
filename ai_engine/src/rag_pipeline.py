@@ -75,10 +75,10 @@ class RAGPipeline:
         self.is_initialized = True
         logger.info("RAG pipeline initialized successfully!")
 
-    def add_documents(self, source_path: str, course_name: str = None):
+    def add_documents(self, source_path: str, course_code: str = None):
         """Add new documents to existing vector store."""
         logger.info(f"Adding documents from {source_path}")
-        chunks = self.document_processor.process_documents(source_path, course_name=course_name)
+        chunks = self.document_processor.process_documents(source_path, course_code=course_code)
         if not chunks:
             logger.warning("No new documents were processed")
             return
@@ -93,8 +93,8 @@ class RAGPipeline:
         self, 
         question: str, 
         history: list = None, 
-        user_courses: List[str] = None,     
-        selected_course: str = None,         
+        user_courses: List[str] = None,     # List of course codes (e.g. ["CS101", "MA111"])
+        selected_course: str = None,         # A single course code to lock search to
         forced_documents: List[Document] = None, 
         image_paths: List[str] = None
     ) -> Dict:
@@ -197,17 +197,17 @@ class RAGPipeline:
         # ==================================================================
 
         # -----------------------------------------------------------------
-        # ★ 2. Smart Filtering Logic ★
+        # 2. Smart Filtering Logic (Using Course Codes)
         # -----------------------------------------------------------------
         active_filter = None
         if selected_course:
-            logger.info(f"UI Filter ON: Searching ONLY in '{selected_course}'")
-            active_filter = [selected_course.lower().strip()]
+            logger.info(f"UI Filter ON: Searching ONLY in course code '{selected_course}'")
+            active_filter = [selected_course.upper().strip()]
         elif user_courses:
-            logger.info(f"UI Filter OFF: Searching in ALL enrolled courses: {user_courses}")
-            active_filter = [c.lower().strip() for c in user_courses]
+            logger.info(f"UI Filter OFF: Searching in ALL enrolled course codes: {user_courses}")
+            active_filter = [c.upper().strip() for c in user_courses]
         else:
-            logger.info("No courses provided at all. Searching globally.")
+            logger.info("No course codes provided. Searching globally.")
         # -----------------------------------------------------------------
 
         # 3. Agent Retrieval (First Pass - Enrolled Courses)
@@ -289,11 +289,11 @@ class RAGPipeline:
             # ★ الحالة الحرجة: الداتا مش كفاية (False Positive / Not Found)
             # ==================================================================
             
-            # ★ هل نعمل محاولة ثانية في باقي الكلية؟ ★
-            should_search_globally = (selected_course is None)
+            # ★ DISABLED Global Search Pass to strictly enforce registered course filtering ★
+            should_search_globally = False
             
             if should_search_globally:
-                logger.info("Not found in enrolled courses. Agent 3.5: Trying Global Search (Second Pass)...")
+                logger.info("Agent 3.5: Trying Global Search (Second Pass)...")
                 global_docs = self.retriever.retrieve(rewritten_query, user_courses=None)
                 
                 if global_docs:

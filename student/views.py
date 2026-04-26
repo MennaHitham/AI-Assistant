@@ -194,14 +194,24 @@ class StudentChatBotView(APIView):
         )
 
         # Execute AI Query
-        selected_course = course_offering.course.name if course_offering else None
+        selected_course = course_offering.course.code if course_offering else None
+        
+        # Build list of ALL enrolled course codes for the student
+        enrolled_course_codes = list(
+            Enrollment.objects.filter(
+                student=request.user,
+                status=Enrollment.Status.ACTIVE,
+            ).select_related('course_offering__course')
+            .values_list('course_offering__course__code', flat=True)
+        )
         
         try:
             rag = get_rag_pipeline()
             ai_result = rag.query(
                 question=content,
                 history=history,
-                selected_course=selected_course
+                selected_course=selected_course,
+                user_courses=enrolled_course_codes
             )
             ai_response_content = ai_result.get("answer", "I'm sorry, I couldn't process that.")
             sources = ai_result.get("sources", [])

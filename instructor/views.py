@@ -182,6 +182,30 @@ class MaterialListView(APIView):
             if serializer.is_valid():
                 material = serializer.save(uploaded_by=request.user)
                 created_materials.append(material)
+                
+                # -------------------------------------------------------------
+                # ★ AI Incremental Ingestion ★
+                # -------------------------------------------------------------
+                try:
+                    from ai_engine.ai_services import get_rag_pipeline
+                    rag = get_rag_pipeline()
+                    
+                    # Ensure it's initialized (loads vector store if exists)
+                    if not rag.is_initialized:
+                        try:
+                            rag.vector_store_manager.load_vector_store()
+                            rag.is_initialized = True
+                        except:
+                            logger.warning("Vector store not found during incremental upload. AI will create it.")
+                    
+                    file_path = material.file.path
+                    course_code = material.course_offering.course.code
+                    
+                    logger.info(f"Triggering AI ingestion for: {file_path} (Course: {course_code})")
+                    rag.add_documents(file_path, course_code=course_code)
+                except Exception as ai_e:
+                    logger.error(f"AI Ingestion failed for {material.title}: {str(ai_e)}")
+                    # Note: We don't fail the Django upload if AI indexing fails.
             else:
                 errors.append({
                     "file": uploaded_file.name,

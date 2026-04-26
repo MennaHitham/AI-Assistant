@@ -25,6 +25,7 @@ from config.settings import (
     _MAX_LOADER_WORKERS
 )
 from src.document_cleaning import clean_documents
+from src.course_mapping import get_course_code
 
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
@@ -79,7 +80,7 @@ class DocumentProcessor:
     # Public pipeline                                                      #
     # ------------------------------------------------------------------ #
 
-    def process_documents(self, source_path: str, course_name: Optional[str] = None) -> List[Document]:
+    def process_documents(self, source_path: str, course_code: Optional[str] = None) -> List[Document]:
         """Complete pipeline for a specific folder or file."""
         path = Path(source_path)
         if path.is_file():
@@ -92,10 +93,15 @@ class DocumentProcessor:
         if not documents:
             return []
 
-        if course_name:
-            logger.info(f"Tagging documents with course_name: {course_name}")
+        if course_code:
+            logger.info(f"Tagging documents with course_code: {course_code}")
             for doc in documents:
-                doc.metadata["course_name"] = course_name.lower().strip()
+                doc.metadata["course_code"] = course_code.upper().strip()
+                doc.metadata["doc_category"] = "course_specific"
+        else:
+            logger.info(f"No course_code provided. Tagging as campus_general.")
+            for doc in documents:
+                doc.metadata["doc_category"] = "campus_general"
 
         documents = clean_documents(documents)
         if not documents:
@@ -109,8 +115,7 @@ class DocumentProcessor:
     def process_courses_from_root(self, root_data_path: str, skip_sources: set = None) -> List[Document]:
         """
         يقرأ فولدر الـ data الرئيسي، يكتشف فولدرات المواد جواه،
-        ويعمل معالجة كاملة لكل مادة مع وضع اسم المادة في الميتاداتا.
-        يدعم الهيكل المتداخل (Department/Course).
+        ويعمل معالجة كاملة لكل مادة مع وضع كود المادة في الميتاداتا.
         """
         root = Path(root_data_path)
         if not root.is_dir():
@@ -120,44 +125,70 @@ class DocumentProcessor:
         all_chunks = []
         skip_sources = skip_sources or set()
         
-        # نمر على كل الفولدرات (year1, year2, ...)
-        year_folders = [d for d in root.iterdir() if d.is_dir() and d.name.lower().startswith('year')]
-        
-        if not year_folders:
-            logger.warning(f"No 'year' folders found in {root_data_path}. Processing flat.")
-            return self.process_documents(str(root))
+        # 1. Process files directly in root as campus_general
+        root_files = [f for f in root.iterdir() if f.is_file() and f.suffix.lower() in self.loader_mapping]
+        for root_file in root_files:
+            source_abs = str(root_file.resolve())
+            if source_abs in skip_sources:
+                continue
+            logger.info(f"Processing general document: {root_file.name}")
+            try:
+                doc_chunks = self.process_documents(str(root_file), course_code=None)
+                all_chunks.extend(doc_chunks)
+            except Exception as e:
+                logger.error(f"Error processing {root_file}: {e}")
 
-        departments = {'ai', 'it', 'is', 'cs', 'ds', 'general'}
-
-        for year_dir in year_folders:
-            logger.info(f"Scanning {year_dir.name}...")
+        # 2. Process folders
+        for item in root.iterdir():
+            if not item.is_dir():
+                continue
             
-            # نمشي في الفولدرات اللي جوه الـ year
-            for item in year_dir.rglob("*"):
-                if item.is_file() and item.suffix.lower() in self.loader_mapping:
-                    source_abs = str(item.resolve())
-                    if source_abs in skip_sources:
-                        continue
-                    
-                    # تحديد اسم المادة (Course Name)
-                    # الهيكل: yearX / [Dept] / Course / File
-                    rel_parts = item.relative_to(year_dir).parts
-                    
-                    if len(rel_parts) >= 2 and rel_parts[0].lower() in departments:
-                        # Case: yearX/AI/Machine Learning/Lecture 1.pdf -> Course = Machine Learning
-                        course_name = rel_parts[1]
-                    else:
-                        # Case: yearX/CS/Lecture 1.pdf -> Course = CS
-                        # Case: yearX/Math-1/Notes.pdf -> Course = Math-1
-                        course_name = rel_parts[0]
-                    
-                    logger.info(f"Processing: {item.name} -> Course: {course_name}")
-                    
-                    try:
-                        doc_chunks = self.process_documents(str(item), course_name=course_name)
-                        all_chunks.extend(doc_chunks)
-                    except Exception as e:
-                        logger.error(f"Error processing {item}: {e}")
+            # Skip internal system folders
+            if item.name.lower() in ['processed', 'presentation_images']:
+                continue
+                
+            if item.name.lower().startswith('year'):
+                # Process year folders recursively
+                logger.info(f"Scanning {item.name}...")
+                departments = {'ai', 'it', 'is', 'cs', 'ds', 'general'}
+                
+                for sub_item in item.rglob("*"):
+                    if sub_item.is_file() and sub_item.suffix.lower() in self.loader_mapping:
+                        source_abs = str(sub_item.resolve())
+                        if source_abs in skip_sources:
+                            continue
+                        
+                        # Determine course folder name
+                        rel_parts = sub_item.relative_to(item).parts
+                        if len(rel_parts) >= 2 and rel_parts[0].lower() in departments:
+                            course_folder = rel_parts[1]
+                        else:
+                            course_folder = rel_parts[0]
+                        
+                        course_code = get_course_code(course_folder)
+                        logger.info(f"Processing: {sub_item.name} -> Code: {course_code}")
+                        
+                        try:
+                            doc_chunks = self.process_documents(str(sub_item), course_code=course_code)
+                            all_chunks.extend(doc_chunks)
+                        except Exception as e:
+                            logger.error(f"Error processing {sub_item}: {e}")
+            else:
+                # Process course folders directly at root
+                course_code = get_course_code(item.name)
+                logger.info(f"Scanning direct course folder: {item.name} -> Code: {course_code}")
+                
+                for sub_item in item.rglob("*"):
+                    if sub_item.is_file() and sub_item.suffix.lower() in self.loader_mapping:
+                        source_abs = str(sub_item.resolve())
+                        if source_abs in skip_sources:
+                            continue
+                        
+                        try:
+                            doc_chunks = self.process_documents(str(sub_item), course_code=course_code)
+                            all_chunks.extend(doc_chunks)
+                        except Exception as e:
+                            logger.error(f"Error processing {sub_item}: {e}")
 
         return all_chunks
 

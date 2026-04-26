@@ -108,7 +108,7 @@ class Retriever:
     def retrieve(
         self,
         query: str,
-        user_courses: Optional[List[str]] = None, # تغيير من academic_year إلى user_courses
+        user_courses: Optional[List[str]] = None, # Expects a list of course codes (e.g. ["CS101", "MA111"])
     ) -> List[Document]:
         
         logger.info(f"Retrieving for query: {query[:80]!r}")
@@ -118,11 +118,11 @@ class Retriever:
         # ---- Step 1: Dense retrieval with Course Filtering --------
         where_filter = None
         if user_courses:
-            # تنظيف أسماء المواد عشان مطابقة الـ Metadata
-            clean_courses = [c.lower().strip() for c in user_courses if c.strip()]
-            if clean_courses:
-                where_filter = {"course_name": {"$in": clean_courses}}
-                logger.info(f"Applying user_courses filter: {clean_courses}")
+            # Clean course codes for metadata matching
+            clean_codes = [c.upper().strip() for c in user_courses if c.strip()]
+            if clean_codes:
+                where_filter = {"course_code": {"$in": clean_codes}}
+                logger.info(f"Applying course_code filter: {clean_codes}")
 
         dense_results: List[Tuple[Document, float]] = (
             vector_store.similarity_search_with_score(
@@ -132,16 +132,11 @@ class Retriever:
             )
         )
 
-        # Fallback: if filtered search returns nothing, try without filter
-        if not dense_results and where_filter:
-            logger.warning(f"No results found for courses {user_courses}. Trying global search fallback...")
-            dense_results = vector_store.similarity_search_with_score(
-                query,
-                k=self.top_k * 2,
-            )
+        # Removed fallback to global search to strictly enforce course-code filtering
+        pass
 
         if not dense_results:
-            logger.warning("Dense retrieval returned no results even after fallback.")
+            logger.warning("Dense retrieval returned no results.")
             return []
 
         dense_docs = [doc for doc, _ in dense_results]
@@ -162,9 +157,27 @@ class Retriever:
             for doc, score in zip(self._all_docs, norm_bm25):
                 bm25_score_map[_doc_key(doc)] = float(score)
 
-        # ---- Step 3: Combine scores -----------------------------------------
+        # ---- Step 3: Combine and STRICTLY Filter ----------------------------
         combined: List[Tuple[Document, float]] = []
+        
+        # Normalize allowed codes for robust comparison
+        allowed_codes = set()
+        if user_courses:
+            allowed_codes = {c.upper().strip() for c in user_courses if c.strip()}
+            logger.info(f"STRICT FILTER ACTIVE. Allowed: {allowed_codes}")
+
         for doc in dense_docs:
+            # Get and normalize the document's course code
+            doc_course_raw = doc.metadata.get("course_code", "")
+            doc_course = doc_course_raw.upper().strip() if doc_course_raw else ""
+            
+            # DEBUG: Log every document's code to see what's leaking
+            logger.info(f"Checking Doc: [{doc_course_raw}] -> Normalized: [{doc_course}]")
+
+            if allowed_codes and doc_course not in allowed_codes:
+                logger.warning(f"BLOCKING document from course '{doc_course_raw}' - Not in allowed list.")
+                continue
+
             key = _doc_key(doc)
             d_score = dense_score_map.get(key, 0.0)
             b_score = bm25_score_map.get(key, 0.0)
@@ -174,6 +187,7 @@ class Retriever:
         combined.sort(key=lambda x: x[1], reverse=True)
         candidates = [doc for doc, _ in combined[: self.top_k * 2]]
         
+        logger.info(f"Final candidate count after strict filtering: {len(candidates)}")
         return self._rerank(query, candidates)
 
     def retrieve_with_scores(
