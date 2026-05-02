@@ -196,11 +196,11 @@ class StudentChatBotView(APIView):
         # Execute AI Query
         selected_course = course_offering.course.code if course_offering else None
         
-        # Build list of ALL enrolled course codes for the student
+        # Build list of ALL enrolled course codes for the student (Current + Completed)
         enrolled_course_codes = list(
             Enrollment.objects.filter(
                 student=request.user,
-                status=Enrollment.Status.ACTIVE,
+                status__in=[Enrollment.Status.ACTIVE, Enrollment.Status.COMPLETED],
             ).select_related('course_offering__course')
             .values_list('course_offering__course__code', flat=True)
         )
