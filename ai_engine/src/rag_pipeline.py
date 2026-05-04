@@ -115,9 +115,9 @@ class RAGPipeline:
         # 0. Definitions & Memory
         # -----------------------------------------------------------------
         question_lower = question.lower().strip()
-        presentation_keywords = ["presentation", "slides", "powerpoint", "pptx", "make a presentation", "عرض تقديمي", "شرائح", "بوربوينت", "اعمل عرض", "سوي بريزنتيشن"]
+        presentation_keywords = ["presentation", "slides", "powerpoint", "pptx", "make a presentation", "عرض تقديمي", "شرائح", "بوربوينت", "اعمل عرض", "سوي بريزنتيشن", "slideshow", "slideshows", "deck"]
         recommendation_keywords = ["recommend", "suggest", "more resources", "other courses", "another video", "مقترح", "ترشيح", "مصادر أخرى", "كورس آخر", "نرشح", "زيدني"]
-        approval_keywords = ["approved", "looks good", "go ahead", "proceed", "تمام", "اعتمد", "ممتاز", "موافق", "باشر", "good", "ok", "nice", "yes", "حلو", "ماشي", "اعمله", "done"]
+        approval_keywords = ["approved", "looks good", "go ahead", "proceed", "تمام", "اعتمد", "ممتاز", "موافق", "باشر", "good", "ok", "nice", "yes", "حلو", "ماشي", "اعمله", "done", "agree", "perfect", "yep", "sure"]
 
         logger.info("Agent 1 (Memory): Rewriting query...")
         rewritten_query = self.generator.rewrite_query_with_memory(question, history or [])
@@ -137,7 +137,7 @@ class RAGPipeline:
         # ★ PRESENTATION ARCHITECT FLOW ★
         # -----------------------------------------------------------------
         if is_presentation or is_approval:
-            # Detect Phase 2 (Approval)
+            # Detect Phase 2 (Approval or Adjustment)
             last_assistant_msg = ""
             if history:
                 for msg in reversed(history):
@@ -145,14 +145,32 @@ class RAGPipeline:
                         last_assistant_msg = msg["content"]
                         break
             
-            is_blueprint_context = "PHASE 1: THE BLUEPRINT" in last_assistant_msg or "Slide-by-Slide Outline" in last_assistant_msg
+            # More robust blueprint detection: scan entire recent history for a blueprint
+            history_text = " ".join([m["content"].upper() for m in history]) if history else ""
+            blueprint_markers = [
+                "PHASE 1: THE BLUEPRINT", 
+                "SLIDE-BY-SLIDE OUTLINE", 
+                "PROPOSED SLIDES", 
+                "BLUEPRINT",
+                "المخطط المبدئي",
+                "REVISED PRESENTATION"
+            ]
+            is_blueprint_context = any(marker in history_text for marker in blueprint_markers) or any(marker in last_assistant_msg.upper() for marker in blueprint_markers)
+            
             is_phase_2 = is_approval and is_blueprint_context
             is_adjustment = not is_approval and is_blueprint_context and not is_presentation
 
             logger.info(f"Presentation Architect Flow: {'Phase 2' if is_phase_2 else 'Phase 1/Refinement'}")
             
             # Retrieve relevant content for the topic
-            raw_documents = forced_documents if forced_documents else self.retriever.retrieve(rewritten_query)
+            # IMPROVEMENT: In Phase 2, use the Blueprint as the search query to ensure we get the right materials
+            search_query = rewritten_query
+            if is_phase_2:
+                # Extract first few lines of blueprint as a search hint
+                search_query = "\n".join(last_assistant_msg.split("\n")[:10])
+                logger.info(f"Phase 2 Search Hint: {search_query[:100]}...")
+
+            raw_documents = forced_documents if forced_documents else self.retriever.retrieve(search_query)
             context_parts = []
             if youtube_data:
                 context_parts.append(f"[YOUTUBE TRANSCRIPT]: {youtube_data.get('transcript', '')}")
@@ -215,7 +233,17 @@ class RAGPipeline:
         if forced_documents:
             documents = forced_documents
         else:
-            documents = self.retriever.retrieve(rewritten_query, user_courses=active_filter)
+            # CLEAN the query for retrieval: remove "presentation", "make a", etc. 
+            # to prevent them from diluting the vector search.
+            clean_search_query = rewritten_query
+            for kw in presentation_keywords + ["make", "create", "about", "discussing", "regarding"]:
+                clean_search_query = clean_search_query.lower().replace(kw, "").strip()
+            
+            if not clean_search_query: # Fallback if empty
+                clean_search_query = rewritten_query
+                
+            logger.info(f"Cleaned Retrieval Query: {clean_search_query}")
+            documents = self.retriever.retrieve(clean_search_query, user_courses=active_filter)
 
         # 4. Prepare YouTube Context if exists
         context_parts = []

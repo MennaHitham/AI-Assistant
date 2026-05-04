@@ -168,16 +168,21 @@ Provide the Blueprint:"""
 PHASE 2: CONTENT & VISUAL DESIGN
 
 STRICT CONSTRAINTS:
-1. Information Density: Use the "Rule of Six" (max 6 bullets per slide, max 6 words per bullet).
-2. Content Quality: Bullets must be MEANINGFUL and descriptive. Avoid single words (e.g., instead of "Predicts", use "Predicts continuous numerical output values").
+1. Information Density: Use max 6 bullets per slide. Each bullet must be a FULL EDUCATIONAL SENTENCE (10-18 words), NOT a short phrase or heading.
+2. Content Quality: Every bullet must EXPLAIN something, not just name it.
+   - BAD:  "Represents program in memory"
+   - BAD:  "Contains 0's and 1's code"
+   - GOOD: "The text segment stores the compiled machine code (0s and 1s) of the program that the CPU executes."
+   - GOOD: "The stack segment dynamically allocates memory for local variables and manages return addresses of function calls."
 3. Tone Matching: Adapt the language to the audience (simplified for students, professional for teachers).
 4. The Creative Director Role: For EVERY slide, you must provide a Visual Instruction Block.
+5. STICK TO SOURCE: Use ONLY the provided [CONTENT SOURCE]. Do NOT invent or include external topics (e.g., Turning Test, history of AI) unless they are explicitly in the source text. Focus purely on the technical content provided.
 
 OUTPUT FORMAT:
 Return ONLY a valid JSON array of slide objects. Each object must include:
 - "type": "content"
 - "title": Slide title.
-- "content": List of bullets (max 6).
+- "content": List of bullets (max 6). Each bullet MUST be a complete educational sentence of 10-18 words.
 - "visual": {{ "concept": "...", "prompt": "..." }}
 - "notes": Speaker notes.
 
