@@ -222,6 +222,12 @@ class RAGPipeline:
         if youtube_data:
             meta_header = f"[VIDEO_TITLE: {video_meta['title']}]\n[VIDEO_DURATION: {video_meta['duration']}]\n"
             raw_transcript = youtube_data.get("transcript")
+            
+            # Smart Truncation for long transcripts (staying under Groq limits)
+            if raw_transcript and len(raw_transcript) > 25000: # ~8000 tokens
+                logger.info("Transcript too long, truncating to 25000 characters...")
+                raw_transcript = raw_transcript[:25000] + "\n... [Transcript truncated for length] ..."
+                
             content = raw_transcript if raw_transcript and "[ERROR:" not in str(raw_transcript) else "[No Transcript Available]"
             context_parts.append("[SOURCE: YOUTUBE_VIDEO_TRANSCRIPT]\n" + meta_header + content)
 
@@ -352,7 +358,8 @@ class RAGPipeline:
             
             else:
                 # سؤال عام، والمحاضرات مشتغطيه
-                if youtube_data and youtube_transcript and "[ERROR:" not in str(youtube_transcript):
+                raw_yt_transcript = youtube_data.get('transcript') if youtube_data else None
+                if youtube_data and raw_yt_transcript and "[ERROR:" not in str(raw_yt_transcript):
                     logger.info("Falling back to YouTube Transcript...")
                     yt_context = context_parts[0] if context_parts else ""
                     answer = self.generator.generate_answer(question, yt_context, is_youtube=True, history=history)

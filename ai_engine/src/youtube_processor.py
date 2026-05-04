@@ -24,7 +24,26 @@ class YouTubeProcessor:
     
     def __init__(self):
         self.whisper_model = None
-        self.model_size = "tiny" # Use 'tiny' for speed and lower resource usage
+        self.model_size = "tiny" 
+        self.cache_dir = os.path.join(os.path.dirname(__file__), "..", "data", "transcript_cache")
+        os.makedirs(self.cache_dir, exist_ok=True)
+
+    def _get_cache_path(self, video_id: str) -> str:
+        return os.path.join(self.cache_dir, f"{video_id}.json")
+
+    def _load_cache(self, video_id: str) -> Optional[Dict]:
+        path = self._get_cache_path(video_id)
+        if os.path.exists(path):
+            import json
+            with open(path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        return None
+
+    def _save_cache(self, video_id: str, data: Dict):
+        path = self._get_cache_path(video_id)
+        import json
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
 
     @staticmethod
     def extract_video_id(url: str) -> Optional[str]:
@@ -46,15 +65,16 @@ class YouTubeProcessor:
 
     def get_video_info(self, video_id: str) -> Dict:
         """Fetch video title and duration using yt-dlp."""
+        default_info = {"title": "Unknown Title", "duration": "N/A"}
         if not TRANSCRIPTION_AVAILABLE:
-            return {"title": "Unknown Title", "duration": "N/A"}
+            return default_info
             
         try:
             ydl_opts = {
                 'quiet': True, 
                 'no_warnings': True,
+                'no_playlist': True,
                 'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
                 'nocheckcertificate': True,
             }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -66,7 +86,7 @@ class YouTubeProcessor:
                 }
         except Exception as e:
             logger.warning(f"Failed to fetch metadata for {video_id}: {e}")
-            return {"title": "Unknown Title", "duration": "N/A"}
+            return default_info
 
     def _format_timestamp(self, seconds: float) -> str:
         """Convert seconds to HH:MM:SS format."""
@@ -198,7 +218,9 @@ class YouTubeProcessor:
             try:
                 if not self.whisper_model:
                     logger.info(f"Loading Whisper model ({self.model_size})...")
-                    self.whisper_model = WhisperModel(self.model_size, device="cpu", compute_type="int8")
+                    device = "cuda" if os.environ.get('EMBEDDING_DEVICE') == 'cuda' else "cpu"
+                    compute_type = "float16" if device == "cuda" else "int8"
+                    self.whisper_model = WhisperModel(self.model_size, device=device, compute_type=compute_type)
                 
                 segments, info = self.whisper_model.transcribe(audio_path, beam_size=5)
                 
@@ -219,16 +241,29 @@ class YouTubeProcessor:
         if not video_id:
             return None
         
-        # Get actual metadata (Title/Duration)
-        info = self.get_video_info(video_id)
-        
-        # Get transcript (API or Whisper)
+        # Check Cache first
+        cached_data = self._load_cache(video_id)
+        if cached_data:
+            logger.info(f"Using CACHED transcript for {video_id}")
+            return cached_data
+
+        # 1. Get transcript FIRST (Fastest)
         transcript = self.get_transcript(video_id)
         
-        # We always return the metadata if we found the video ID
-        return {
+        # 2. Get metadata SECOND (Slower, optional)
+        info = {"title": "Unknown Title", "duration": "N/A"}
+        if transcript: # Only wait for metadata if we at least have the transcript
+            info = self.get_video_info(video_id)
+        
+        result = {
             "transcript": transcript,
             "title": info["title"],
             "duration": info["duration"],
             "video_id": video_id
         }
+        
+        # Save to Cache
+        if transcript:
+            self._save_cache(video_id, result)
+            
+        return result
